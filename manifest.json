@@ -1,0 +1,73 @@
+{
+  "dxt_version": "0.1",
+  "name": "maccy-clipboard-mcp",
+  "display_name": "Maccy Clipboard History",
+  "version": "0.1.0",
+  "description": "Access and search your Maccy clipboard history",
+  "long_description": "This MCP server provides tools to access, search, and manage your Maccy clipboard history. Query recent items, search by content or application, and get detailed clipboard statistics. All data stays local on your machine.",
+  "author": {
+    "name": "Claude",
+    "email": "noreply@anthropic.com"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"]
+    }
+  },
+  "tools": [
+    {
+      "name": "search_clipboard",
+      "description": "Search clipboard history by text pattern or regex with advanced filtering"
+    },
+    {
+      "name": "get_recent_items",
+      "description": "Get recent clipboard items with optional filters and image support"
+    },
+    {
+      "name": "copy_to_clipboard",
+      "description": "Copy a specific history item back to current clipboard"
+    },
+    {
+      "name": "pin_item",
+      "description": "Pin a clipboard item for persistence"
+    },
+    {
+      "name": "unpin_item",
+      "description": "Unpin a clipboard item"
+    },
+    {
+      "name": "clear_history",
+      "description": "Clear clipboard history with safety confirmations"
+    },
+    {
+      "name": "export_history",
+      "description": "Export clipboard data in JSON/CSV/TXT formats"
+    },
+    {
+      "name": "get_clipboard_stats", 
+      "description": "Get clipboard usage statistics and analytics"
+    },
+    {
+      "name": "get_items_by_app",
+      "description": "Get clipboard items from specific application with image support"
+    }
+  ],
+  "keywords": [
+    "clipboard",
+    "maccy", 
+    "history",
+    "search",
+    "macos"
+  ],
+  "license": "MIT",
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin"],
+    "runtimes": {
+      "node": ">=16.0.0"
+    }
+  }
+}

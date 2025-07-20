@@ -1,0 +1,19 @@
+{
+  "name": "maccy-clipboard-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for accessing Maccy clipboard history",
+  "type": "module",
+  "main": "server/index.js",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "sqlite3": "^5.1.7"
+  },
+  "keywords": [
+    "mcp",
+    "clipboard",
+    "maccy",
+    "history",
+    "macos"
+  ]
+}
