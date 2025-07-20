@@ -490,6 +490,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Filter by application that copied the item",
             },
+            exclude_images: {
+              type: "boolean",
+              description: "Exclude images from the results (default: false)",
+              default: false,
+            },
           },
         },
       },
@@ -716,7 +721,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_recent_items": {
-        const { limit = 10, application } = request.params.arguments;
+        const { limit = 10, application, exclude_images = false } = request.params.arguments;
         const results = await db.getRecentItems(limit, application);
         
         const filterText = application ? ` from ${application}` : '';
@@ -728,7 +733,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ];
         
         for (const item of results) {
-          content.push(...formatClipboardItem(item, true));
+          content.push(...formatClipboardItem(item, !exclude_images));
         }
         
         return { content };
