@@ -12,6 +12,44 @@ import os from "os";
 import path from "path";
 import { execSync } from "child_process";
 import fs from "fs/promises";
+import fsSync from "fs";
+
+// Logging utility
+function logToFile(level, message, data = null) {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    level,
+    message,
+    data: data ? JSON.stringify(data, (key, value) => {
+      // Handle Buffer objects in logging
+      if (Buffer.isBuffer(value)) {
+        return `[Buffer: ${value.length} bytes]`;
+      }
+      // Handle circular references and other problematic objects
+      if (typeof value === 'object' && value !== null) {
+        try {
+          JSON.stringify(value);
+          return value;
+        } catch (e) {
+          return `[Object: ${e.message}]`;
+        }
+      }
+      return value;
+    }, 2) : null
+  };
+  
+  const logLine = `[${level.toUpperCase()}] ${timestamp}: ${message}${data ? `\nData: ${logEntry.data}` : ''}\n`;
+  
+  try {
+    // Write to both stderr and file
+    console.error(logLine.trim());
+    const logPath = path.join(process.cwd(), 'mcp-debug.log');
+    fsSync.appendFileSync(logPath, logLine);
+  } catch (e) {
+    console.error(`[ERROR] ${timestamp}: Failed to log message: ${e.message}`);
+  }
+}
 
 // Maccy database path
 const MACCY_DB_PATH = path.join(
@@ -31,6 +69,45 @@ class ClipboardDB {
     this.get = promisify(this.db.get.bind(this.db));
     this.all = promisify(this.db.all.bind(this.db));
     this.run = promisify(this.db.run.bind(this.db));
+  }
+
+  // Sanitize text content to ensure valid UTF-8 and remove invalid Unicode sequences
+  sanitizeText(text) {
+    if (!text) return text;
+    
+    try {
+      // Convert to string if needed
+      let str = typeof text === 'string' ? text : text.toString();
+      
+      // Remove null bytes and other control characters
+      str = str.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+      
+      // Replace invalid UTF-8 sequences and unpaired surrogates
+      // This regex matches unpaired high surrogates, unpaired low surrogates, and non-characters
+      str = str.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
+      
+      // Additional fix for specific case - remove any remaining problematic Unicode sequences
+      str = str.replace(/[\uD800-\uDFFF]/g, '\uFFFD');
+      
+      // Remove other problematic Unicode characters
+      str = str.replace(/[\uFFFE\uFFFF]/g, '');
+      
+      // Additional cleanup for common problematic patterns
+      // Remove zero-width characters that can cause issues
+      str = str.replace(/[\u200B-\u200D\uFEFF]/g, '');
+      
+      // Ensure the string is valid UTF-8 by encoding and decoding
+      const encoded = Buffer.from(str, 'utf8');
+      const decoded = encoded.toString('utf8');
+      
+      // Final check - try to JSON stringify to ensure it's safe
+      JSON.stringify(decoded);
+      
+      return decoded;
+    } catch (e) {
+      // If all else fails, return a safe placeholder
+      return '[Content could not be sanitized]';
+    }
   }
 
   // Convert Maccy timestamp (seconds since 2001-01-01) to JavaScript Date
@@ -128,8 +205,8 @@ class ClipboardDB {
             // Keep as Buffer for binary data (typically images)
             itemData.content[contentRow.ZTYPE] = contentRow.ZVALUE;
           } else {
-            // Convert to string for text content
-            itemData.content[contentRow.ZTYPE] = contentRow.ZVALUE.toString();
+            // Convert to string for text content and sanitize
+            itemData.content[contentRow.ZTYPE] = this.sanitizeText(contentRow.ZVALUE.toString());
           }
         }
       }
@@ -140,8 +217,11 @@ class ClipboardDB {
     return results;
   }
 
-  async getRecentItems(limit = 10, application = null) {
+  async getRecentItems(limit = 10, application = null, excludeImages = true) {
     // First get the history items
+    // Fetch extra items to account for ones that might be filtered out
+    const fetchLimit = excludeImages ? limit * 3 : limit;
+    
     let sql = `
       SELECT h.Z_PK as id, h.ZTITLE, h.ZAPPLICATION, h.ZLASTCOPIEDAT, h.ZNUMBEROFCOPIES, h.ZPIN
       FROM ZHISTORYITEM h
@@ -154,18 +234,24 @@ class ClipboardDB {
     }
     
     sql += ` ORDER BY h.ZLASTCOPIEDAT DESC LIMIT ?`;
-    params.push(limit);
+    params.push(fetchLimit);
     
     const historyItems = await this.all(sql, params);
     
-    // Then get all content for these items
+    // Then get content for these items, optionally excluding images
     const results = [];
     for (const item of historyItems) {
-      const contentSql = `
+      let contentSql = `
         SELECT ZTYPE, ZVALUE 
         FROM ZHISTORYITEMCONTENT 
         WHERE ZITEM = ?
       `;
+      
+      if (excludeImages) {
+        contentSql += ` AND ZTYPE NOT IN ('public.png', 'public.jpeg', 'public.tiff', 'com.apple.NSImage') 
+                        AND ZTYPE NOT LIKE 'image/%'`;
+      }
+      
       const contentRows = await this.all(contentSql, [item.id]);
       
       const itemData = {
@@ -181,19 +267,38 @@ class ClipboardDB {
       // Group all content types for this item
       for (const contentRow of contentRows) {
         if (contentRow.ZVALUE !== null) {
+          // Skip image types if excluding images
+          if (excludeImages && (
+            contentRow.ZTYPE === 'public.png' || 
+            contentRow.ZTYPE === 'public.jpeg' || 
+            contentRow.ZTYPE === 'public.tiff' || 
+            contentRow.ZTYPE === 'com.apple.NSImage' ||
+            contentRow.ZTYPE.startsWith('image/')
+          )) {
+            continue;
+          }
+          
           // Check if it's binary data (Buffer) - SQLite returns BLOB as Buffer
           if (Buffer.isBuffer(contentRow.ZVALUE)) {
             // Keep as Buffer for binary data (typically images)
             itemData.content[contentRow.ZTYPE] = contentRow.ZVALUE;
             // console.error(`DEBUG: Found Buffer data for type ${contentRow.ZTYPE}, size: ${contentRow.ZVALUE.length} bytes`);
           } else {
-            // Convert to string for text content
-            itemData.content[contentRow.ZTYPE] = contentRow.ZVALUE.toString();
+            // Convert to string for text content and sanitize
+            itemData.content[contentRow.ZTYPE] = this.sanitizeText(contentRow.ZVALUE.toString());
           }
         }
       }
       
-      results.push(itemData);
+      // Only include items that have content after filtering (or if we have a title)
+      if (Object.keys(itemData.content).length > 0 || itemData.title) {
+        results.push(itemData);
+        
+        // Stop if we've collected enough items
+        if (results.length >= limit) {
+          break;
+        }
+      }
     }
     
     return results;
@@ -227,7 +332,7 @@ class ClipboardDB {
   }
 
   async getItemsByApplication(application, limit = 10) {
-    return this.getRecentItems(limit, application);
+    return this.getRecentItems(limit, application, true);
   }
 
   async getItemById(id) {
@@ -245,7 +350,7 @@ class ClipboardDB {
     // Group content by type for the same item
     const item = {
       id: results[0].id,
-      title: results[0].ZTITLE,
+      title: this.sanitizeText(results[0].ZTITLE),
       application: results[0].ZAPPLICATION,
       lastCopied: this.formatDate(this.convertTimestamp(results[0].ZLASTCOPIEDAT)),
       copyCount: results[0].ZNUMBEROFCOPIES,
@@ -263,8 +368,8 @@ class ClipboardDB {
             item.content[row.ZTYPE] = row.ZVALUE;
           }
         } else {
-          // For text content, convert to string
-          item.content[row.ZTYPE] = row.ZVALUE?.toString() || row.ZVALUE;
+          // For text content, convert to string and sanitize
+          item.content[row.ZTYPE] = this.sanitizeText(row.ZVALUE?.toString() || row.ZVALUE);
         }
       }
     }
@@ -362,7 +467,7 @@ class ClipboardDB {
       if (!items[row.id]) {
         items[row.id] = {
           id: row.id,
-          title: row.ZTITLE,
+          title: this.sanitizeText(row.ZTITLE),
           application: row.ZAPPLICATION,
           lastCopied: this.formatDate(this.convertTimestamp(row.ZLASTCOPIEDAT)),
           copyCount: row.ZNUMBEROFCOPIES,
@@ -376,7 +481,7 @@ class ClipboardDB {
             row.ZTYPE === 'public.tiff' || row.ZTYPE.startsWith('image/')) {
           items[row.id].content[row.ZTYPE] = `[Binary data: ${row.ZVALUE.length} bytes]`;
         } else {
-          items[row.id].content[row.ZTYPE] = row.ZVALUE?.toString() || row.ZVALUE;
+          items[row.id].content[row.ZTYPE] = this.sanitizeText(row.ZVALUE?.toString() || row.ZVALUE);
         }
       }
     }
@@ -492,8 +597,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             exclude_images: {
               type: "boolean",
-              description: "Exclude images from the results (default: false)",
-              default: false,
+              description: "Exclude images from the results (default: true)",
+              default: true,
             },
           },
         },
@@ -620,12 +725,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 // Helper function to format clipboard items with image support
 function formatClipboardItem(item, includeImages = false) {
-  const content = [];
-  
-  // Add text description
-  const textContent = item.content && typeof item.content === 'object' ? 
-    item.content['public.utf8-plain-text'] || item.content['public.text'] || item.title : 
-    item.content || item.title;
+  try {
+    logToFile('debug', `Formatting clipboard item ${item.id}`, {
+      itemId: item.id,
+      includeImages,
+      contentKeys: item.content ? Object.keys(item.content) : [],
+      hasTitle: !!item.title
+    });
+    
+    const content = [];
+    
+    // Add text description
+    const textContent = item.content && typeof item.content === 'object' ? 
+      item.content['public.utf8-plain-text'] || item.content['public.text'] || item.title : 
+      item.content || item.title;
   
   // Count different content types
   const contentTypes = item.content && typeof item.content === 'object' ? Object.keys(item.content) : [];
@@ -665,6 +778,26 @@ function formatClipboardItem(item, includeImages = false) {
             throw new Error(`Unknown value type: ${typeof value}`);
           }
           
+          logToFile('debug', `Processing image data`, {
+            itemId: item.id,
+            contentType,
+            originalSize: value?.length || 0,
+            base64Size: base64Data?.length || 0,
+            sampleData: base64Data?.substring(0, 50) + '...'
+          });
+          
+          // Validate base64 data before adding to response
+          try {
+            JSON.stringify({ data: base64Data });
+          } catch (jsonError) {
+            logToFile('warn', `Base64 data failed JSON validation`, {
+              itemId: item.id,
+              contentType,
+              error: jsonError.message
+            });
+            throw new Error(`Base64 data validation failed: ${jsonError.message}`);
+          }
+          
           content.push({
             type: "image",
             data: base64Data,
@@ -684,11 +817,38 @@ function formatClipboardItem(item, includeImages = false) {
     }
   }
   
+  logToFile('debug', `Clipboard item formatted successfully`, {
+    itemId: item.id,
+    contentParts: content.length,
+    hasImages: content.some(c => c.type === 'image')
+  });
+  
   return content;
+  } catch (error) {
+    logToFile('error', `Error formatting clipboard item ${item.id}`, {
+      itemId: item.id,
+      error: error.message,
+      stack: error.stack
+    });
+    
+    // Return a safe fallback
+    return [{
+      type: "text",
+      text: `⚠️ Error formatting item ${item.id}: ${error.message}\n`
+    }];
+  }
 }
 
 // Handle tool execution
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const requestId = Math.random().toString(36).substr(2, 9);
+  
+  logToFile('info', `Tool call started: ${request.params.name}`, {
+    requestId,
+    toolName: request.params.name,
+    arguments: request.params.arguments
+  });
+  
   const readOnly = !['copy_to_clipboard', 'pin_item', 'unpin_item', 'clear_history'].includes(request.params.name);
   const db = new ClipboardDB(readOnly);
   
@@ -717,12 +877,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content.push(...formatClipboardItem(item, true));
         }
         
-        return { content };
+        const response = { content };
+        
+        // Validate response can be serialized to JSON before returning
+        try {
+          const serialized = JSON.stringify(response);
+          logToFile('debug', `Search response prepared and validated`, {
+            requestId,
+            resultsCount: results.length,
+            responseSize: serialized.length,
+            contentItemsCount: content.length
+          });
+        } catch (jsonError) {
+          logToFile('error', `Search response failed JSON validation`, {
+            requestId,
+            error: jsonError.message,
+            resultsCount: results.length,
+            contentItemsCount: content.length
+          });
+          throw new Error(`Response serialization failed: ${jsonError.message}`);
+        }
+        
+        return response;
       }
 
       case "get_recent_items": {
-        const { limit = 10, application, exclude_images = false } = request.params.arguments;
-        const results = await db.getRecentItems(limit, application);
+        const { limit = 10, application, exclude_images = true } = request.params.arguments;
+        const results = await db.getRecentItems(limit, application, exclude_images);
         
         const filterText = application ? ` from ${application}` : '';
         const content = [
@@ -733,10 +914,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ];
         
         for (const item of results) {
-          content.push(...formatClipboardItem(item, !exclude_images));
+          try {
+            content.push(...formatClipboardItem(item, !exclude_images));
+          } catch (err) {
+            // If formatting fails for an item, add error info instead
+            content.push({
+              type: "text",
+              text: `⚠️ Error formatting item ${item.id}: ${err.message}\n`
+            });
+          }
         }
         
-        return { content };
+        const response = { content };
+        
+        // Validate response can be serialized to JSON before returning
+        try {
+          const serialized = JSON.stringify(response);
+          logToFile('debug', `Recent items response prepared and validated`, {
+            requestId,
+            resultsCount: results.length,
+            responseSize: serialized.length,
+            contentItemsCount: content.length,
+            excludeImages: exclude_images
+          });
+        } catch (jsonError) {
+          logToFile('error', `Recent items response failed JSON validation`, {
+            requestId,
+            error: jsonError.message,
+            resultsCount: results.length,
+            contentItemsCount: content.length
+          });
+          throw new Error(`Response serialization failed: ${jsonError.message}`);
+        }
+        
+        return response;
       }
 
       case "copy_to_clipboard": {
@@ -860,7 +1071,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ];
         
         for (const item of results) {
-          content.push(...formatClipboardItem(item, true));
+          content.push(...formatClipboardItem(item, false));
         }
         
         return { content };
@@ -870,7 +1081,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error(`Unknown tool: ${request.params.name}`);
     }
   } catch (error) {
-    return {
+    logToFile('error', `Tool call failed: ${request.params.name}`, {
+      requestId,
+      toolName: request.params.name,
+      error: error.message,
+      stack: error.stack
+    });
+    
+    const errorResponse = {
       content: [
         {
           type: "text",
@@ -879,6 +1097,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ],
       isError: true,
     };
+    
+    logToFile('debug', `Error response prepared`, {
+      requestId,
+      responseSize: JSON.stringify(errorResponse).length
+    });
+    
+    return errorResponse;
   } finally {
     db.close();
   }
@@ -887,5 +1112,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // Start the server
 const transport = new StdioServerTransport();
 server.connect(transport);
+
+logToFile('info', 'Maccy Clipboard MCP server starting up', {
+  timestamp: new Date().toISOString(),
+  pid: process.pid,
+  cwd: process.cwd()
+});
 
 console.error("Maccy Clipboard MCP server running...");
