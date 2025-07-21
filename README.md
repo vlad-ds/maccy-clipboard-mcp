@@ -66,7 +66,7 @@ If you encounter issues loading the extension or Node.js related problems:
 
 #### Required Node.js Configuration (if issues occur)
 
-⚠️ **Important**: This extension may require disabling Claude Desktop's built-in Node.js
+⚠️ **If the extension fails to load**, try disabling Claude Desktop's built-in Node.js:
 
 1. **Install Node.js LTS**: Visit [nodejs.org](https://nodejs.org) and download the LTS version
 2. **Configure Claude Desktop**:
@@ -74,7 +74,7 @@ If you encounter issues loading the extension or Node.js related problems:
    - **Disable** "Use Built-in Node.js for MCP"  
    - Restart Claude Desktop
 
-This extension will NOT work with Claude's built-in Node.js. You must use your system's Node.js installation.
+Some users may need to use their system's Node.js installation instead of Claude's built-in version.
 
 #### Additional Troubleshooting Steps
 
