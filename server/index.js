@@ -73,41 +73,13 @@ class ClipboardDB {
 
   // Sanitize text content to ensure valid UTF-8 and remove invalid Unicode sequences
   sanitizeText(text) {
-    if (!text) return text;
-    
-    try {
-      // Convert to string if needed
-      let str = typeof text === 'string' ? text : text.toString();
-      
-      // Remove null bytes and other control characters
-      str = str.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
-      
-      // Replace invalid UTF-8 sequences and unpaired surrogates
-      // This regex matches unpaired high surrogates, unpaired low surrogates, and non-characters
-      str = str.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
-      
-      // Additional fix for specific case - remove any remaining problematic Unicode sequences
-      str = str.replace(/[\uD800-\uDFFF]/g, '\uFFFD');
-      
-      // Remove other problematic Unicode characters
-      str = str.replace(/[\uFFFE\uFFFF]/g, '');
-      
-      // Additional cleanup for common problematic patterns
-      // Remove zero-width characters that can cause issues
-      str = str.replace(/[\u200B-\u200D\uFEFF]/g, '');
-      
-      // Ensure the string is valid UTF-8 by encoding and decoding
-      const encoded = Buffer.from(str, 'utf8');
-      const decoded = encoded.toString('utf8');
-      
-      // Final check - try to JSON stringify to ensure it's safe
-      JSON.stringify(decoded);
-      
-      return decoded;
-    } catch (e) {
-      // If all else fails, return a safe placeholder
-      return '[Content could not be sanitized]';
-    }
+    if (text === null || typeof text === 'undefined') return '';
+    if (typeof text !== 'string') text = String(text);
+
+    // Remove null bytes and other control characters that are invalid in XML
+    // (and often problematic in JSON strings)
+    // eslint-disable-next-line no-control-regex
+    return text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
   }
 
   // Convert Maccy timestamp (seconds since 2001-01-01) to JavaScript Date
@@ -217,7 +189,7 @@ class ClipboardDB {
     return results;
   }
 
-  async getRecentItems(limit = 10, application = null, excludeImages = true) {
+  async getRecentItems(limit = 10, application = null, excludeImages = false) {
     // First get the history items
     // Fetch extra items to account for ones that might be filtered out
     const fetchLimit = excludeImages ? limit * 3 : limit;
@@ -332,7 +304,7 @@ class ClipboardDB {
   }
 
   async getItemsByApplication(application, limit = 10) {
-    return this.getRecentItems(limit, application, true);
+    return this.getRecentItems(limit, application, false);
   }
 
   async getItemById(id) {
@@ -380,14 +352,28 @@ class ClipboardDB {
   async copyToClipboard(itemId) {
     const item = await this.getItemById(itemId);
     if (!item) throw new Error(`Item with ID ${itemId} not found`);
-    
-    // Get the text content to copy
-    const textContent = item.content['public.utf8-plain-text'] || 
-                       item.content['public.text'] || 
+
+    // Prioritize image content if available
+    const imageContent = item.content['public.png'] ||
+                       item.content['public.jpeg'] ||
+                       item.content['public.tiff'];
+
+    if (imageContent && Buffer.isBuffer(imageContent)) {
+      // Use a temporary file to copy image data
+      const tempPath = path.join(os.tmpdir(), `maccy-temp-${Date.now()}.png`);
+      await fs.writeFile(tempPath, imageContent);
+      execSync(`osascript -e 'set the clipboard to (read (POSIX file "${tempPath}") as TIFF picture)'`);
+      await fs.unlink(tempPath);
+      return { success: true, content: `Image of ${imageContent.length} bytes copied to clipboard.` };
+    }
+
+    // Fallback to text content
+    const textContent = item.content['public.utf8-plain-text'] ||
+                       item.content['public.text'] ||
                        item.title;
-    
-    if (!textContent) throw new Error('No text content found to copy');
-    
+
+    if (!textContent) throw new Error('No content found to copy');
+
     // Use pbcopy to set clipboard on macOS
     try {
       execSync('pbcopy', { input: textContent.toString(), encoding: 'utf8' });
@@ -409,22 +395,6 @@ class ClipboardDB {
     return { success: true, itemId, action: 'unpinned' };
   }
 
-  async clearHistory(beforeDate = null, confirm = false) {
-    if (!confirm) {
-      throw new Error('This action requires confirmation. Set confirm=true to proceed.');
-    }
-    
-    let sql = `DELETE FROM ZHISTORYITEM`;
-    const params = [];
-    
-    if (beforeDate) {
-      sql += ` WHERE ZLASTCOPIEDAT < ?`;
-      params.push((beforeDate.getTime() / 1000) - 978307200);
-    }
-    
-    const result = await this.run(sql, params);
-    return { success: true, deletedCount: result.changes };
-  }
 
   async exportHistory(filePath, format = 'json', dateRange = null) {
     // Validate file path
@@ -597,8 +567,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             exclude_images: {
               type: "boolean",
-              description: "Exclude images from the results (default: true)",
-              default: true,
+              description: "Exclude images from the results (default: false)",
+              default: false,
             },
           },
         },
@@ -643,25 +613,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["item_id"],
-        },
-      },
-      {
-        name: "clear_history",
-        description: "Clear clipboard history (requires confirmation)",
-        inputSchema: {
-          type: "object",
-          properties: {
-            before_date: {
-              type: "string",
-              description: "ISO date string - only clear items before this date (optional)",
-            },
-            confirm: {
-              type: "boolean",
-              description: "Confirmation flag - must be true to proceed",
-              default: false,
-            },
-          },
-          required: ["confirm"],
         },
       },
       {
@@ -732,105 +683,83 @@ function formatClipboardItem(item, includeImages = false) {
       contentKeys: item.content ? Object.keys(item.content) : [],
       hasTitle: !!item.title
     });
-    
     const content = [];
-    
     // Add text description
-    const textContent = item.content && typeof item.content === 'object' ? 
-      item.content['public.utf8-plain-text'] || item.content['public.text'] || item.title : 
-      item.content || item.title;
-  
-  // Count different content types
-  const contentTypes = item.content && typeof item.content === 'object' ? Object.keys(item.content) : [];
-  const hasImages = contentTypes.some(type => 
-    type === 'public.png' || type === 'public.jpeg' || type === 'public.tiff' || 
-    type.startsWith('image/') || type === 'com.apple.NSImage'
-  );
-  
-  content.push({
-    type: "text",
-    text: `📋 **${item.application}** (${item.lastCopied}) [ID: ${item.id}]\n` +
-          `   Content: ${typeof textContent === 'string' ? textContent.substring(0, 100) : String(textContent || '').substring(0, 100)}${(textContent?.length || 0) > 100 ? '...' : ''}\n` +
-          `   Content Types: ${contentTypes.join(', ')}\n` +
-          `   Copied ${item.copyCount} times${item.pinned ? ' 📌 Pinned' : ''}${hasImages ? ' 🖼️ Has Images' : ''}\n`
-  });
-  
-  // Add images if present and requested
-  if (includeImages && hasImages && item.content && typeof item.content === 'object') {
-    // console.error(`DEBUG: Processing item ${item.id} with image content. Content types: ${Object.keys(item.content).join(', ')}`);
-    for (const [contentType, value] of Object.entries(item.content)) {
-      if (contentType === 'public.png' || contentType === 'public.jpeg' || 
-          contentType === 'public.tiff' || contentType.startsWith('image/') ||
-          contentType === 'com.apple.NSImage') {
-        // console.error(`DEBUG: Processing image type ${contentType}, value type: ${typeof value}, isBuffer: ${Buffer.isBuffer(value)}`);
-        try {
-          // Handle different possible value types
-          let base64Data;
-          if (Buffer.isBuffer(value)) {
-            base64Data = value.toString('base64');
-          } else if (typeof value === 'string') {
-            // Value might be a hex string or already base64
-            base64Data = Buffer.from(value, 'binary').toString('base64');
-          } else if (value && typeof value === 'object' && value.type === 'Buffer' && Array.isArray(value.data)) {
-            // Handle JSON-serialized Buffer
-            base64Data = Buffer.from(value.data).toString('base64');
-          } else {
-            throw new Error(`Unknown value type: ${typeof value}`);
-          }
-          
-          logToFile('debug', `Processing image data`, {
-            itemId: item.id,
-            contentType,
-            originalSize: value?.length || 0,
-            base64Size: base64Data?.length || 0,
-            sampleData: base64Data?.substring(0, 50) + '...'
-          });
-          
-          // Validate base64 data before adding to response
+    const textContent = (item.content && typeof item.content === 'object' ?
+      item.content['public.utf8-plain-text'] || item.content['public.text'] || item.title :
+      item.content) || item.title;
+
+    // Count different content types
+    const contentTypes = item.content && typeof item.content === 'object' ? Object.keys(item.content) : [];
+    const hasImages = contentTypes.some(type =>
+      type === 'public.png' || type === 'public.jpeg' || type === 'public.tiff' ||
+      type.startsWith('image/') || type === 'com.apple.NSImage'
+    );
+    content.push({
+      type: "text",
+      text: `📋 **${item.application}** (${item.lastCopied}) [ID: ${item.id}]\n` +
+            `   Content: ${textContent}\n` +
+            `   Content Types: ${contentTypes.join(', ')}\n` +
+            `   Copied ${item.copyCount} times${item.pinned ? ' 📌 Pinned' : ''}${hasImages ? ' 🖼️ Has Images' : ''}\n`
+    });
+    // Add images if present and requested
+    if (includeImages && hasImages && item.content && typeof item.content === 'object') {
+      for (const [contentType, value] of Object.entries(item.content)) {
+        if (contentType === 'public.png' || contentType === 'public.jpeg' ||
+            contentType === 'public.tiff' || contentType.startsWith('image/') ||
+            contentType === 'com.apple.NSImage') {
           try {
-            JSON.stringify({ data: base64Data });
-          } catch (jsonError) {
-            logToFile('warn', `Base64 data failed JSON validation`, {
+            // Handle different possible value types
+            let base64Data;
+            if (Buffer.isBuffer(value)) {
+              base64Data = value.toString('base64');
+            } else if (typeof value === 'string') {
+              // Value might be a hex string or already base64
+              base64Data = Buffer.from(value, 'binary').toString('base64');
+            } else if (value && typeof value === 'object' && value.type === 'Buffer' && Array.isArray(value.data)) {
+              // Handle JSON-serialized Buffer
+              base64Data = Buffer.from(value.data).toString('base64');
+            } else {
+              throw new Error(`Unknown value type: ${typeof value}`);
+            }
+            logToFile('debug', `Processing image data`, {
               itemId: item.id,
               contentType,
-              error: jsonError.message
+              originalSize: value?.length || 0,
+              base64Size: base64Data?.length || 0,
             });
-            throw new Error(`Base64 data validation failed: ${jsonError.message}`);
+            // Add a smaller, resized version of the image to the response
+            content.push({
+              type: "image",
+              data: base64Data,
+              mimeType: contentType === 'public.png' ? 'image/png' :
+                       contentType === 'public.jpeg' ? 'image/jpeg' :
+                       contentType === 'public.tiff' ? 'image/tiff' :
+                       contentType === 'com.apple.NSImage' ? 'image/png' :
+                       contentType,
+              width: 100, // Resize the image to a thumbnail
+            });
+          } catch (error) {
+            content.push({
+              type: "text",
+              text: `   📷 Image content (${contentType}) - Size: ${value?.length || 0} bytes [Error: ${error.message}]\n`
+            });
           }
-          
-          content.push({
-            type: "image",
-            data: base64Data,
-            mimeType: contentType === 'public.png' ? 'image/png' : 
-                     contentType === 'public.jpeg' ? 'image/jpeg' :
-                     contentType === 'public.tiff' ? 'image/tiff' : 
-                     contentType === 'com.apple.NSImage' ? 'image/png' :
-                     contentType
-          });
-        } catch (error) {
-          content.push({
-            type: "text",
-            text: `   📷 Image content (${contentType}) - Size: ${value?.length || 0} bytes [Error: ${error.message}]\n`
-          });
         }
       }
     }
-  }
-  
-  logToFile('debug', `Clipboard item formatted successfully`, {
-    itemId: item.id,
-    contentParts: content.length,
-    hasImages: content.some(c => c.type === 'image')
-  });
-  
-  return content;
+    logToFile('debug', `Clipboard item formatted successfully`, {
+      itemId: item.id,
+      contentParts: content.length,
+      hasImages: content.some(c => c.type === 'image')
+    });
+    return content;
   } catch (error) {
     logToFile('error', `Error formatting clipboard item ${item.id}`, {
       itemId: item.id,
       error: error.message,
       stack: error.stack
     });
-    
     // Return a safe fallback
     return [{
       type: "text",
@@ -849,7 +778,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     arguments: request.params.arguments
   });
   
-  const readOnly = !['copy_to_clipboard', 'pin_item', 'unpin_item', 'clear_history'].includes(request.params.name);
+  const readOnly = !['copy_to_clipboard', 'pin_item', 'unpin_item'].includes(request.params.name);
   const db = new ClipboardDB(readOnly);
   
   try {
@@ -902,7 +831,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_recent_items": {
-        const { limit = 10, application, exclude_images = true } = request.params.arguments;
+        const { limit = 10, application, exclude_images = false } = request.params.arguments;
         const results = await db.getRecentItems(limit, application, exclude_images);
         
         const filterText = application ? ` from ${application}` : '';
@@ -993,26 +922,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case "clear_history": {
-        const { before_date, confirm } = request.params.arguments;
-        
-        let beforeDate = null;
-        if (before_date) {
-          beforeDate = new Date(before_date);
-        }
-        
-        const result = await db.clearHistory(beforeDate, confirm);
-        
-        const dateText = beforeDate ? ` before ${beforeDate.toLocaleDateString()}` : '';
-        return {
-          content: [
-            {
-              type: "text",
-              text: `🗑️ Successfully cleared ${result.deletedCount} clipboard items${dateText}`,
-            },
-          ],
-        };
-      }
 
       case "export_history": {
         const { file_path, format = 'json', since, until } = request.params.arguments;

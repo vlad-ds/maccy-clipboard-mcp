@@ -39,10 +39,6 @@
       "description": "Unpin a clipboard item"
     },
     {
-      "name": "clear_history",
-      "description": "Clear clipboard history with safety confirmations"
-    },
-    {
       "name": "export_history",
       "description": "Export clipboard data in JSON/CSV/TXT formats"
     },
