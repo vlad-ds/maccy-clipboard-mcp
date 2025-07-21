@@ -2,6 +2,14 @@
 
 An MCP (Model Context Protocol) server that exposes your Maccy clipboard history to Claude and other AI assistants.
 
+## ⚠️ Important Security Warning
+
+**This tool provides Claude access to your entire clipboard history, which may contain sensitive information such as passwords, API keys, personal data, or confidential content. When connected to external AI systems, this data could potentially be transmitted outside your local machine.**
+
+**By using this MCP server, you acknowledge and accept full responsibility for any data exposure or security risks. The author disclaims all responsibility for any unauthorized access, data leaks, or security breaches that may result from using this tool.**
+
+**Use at your own risk. Consider your security requirements carefully before installation.**
+
 ## About Maccy
 
 [Maccy](https://maccy.app) is a lightweight clipboard manager for macOS that keeps a history of everything you copy. It runs in your menu bar and stores clipboard items locally in a SQLite database. This MCP server connects directly to that database to give Claude access to your clipboard history, allowing you to search, retrieve, and manage your copied content through natural conversation.
