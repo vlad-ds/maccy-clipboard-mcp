@@ -58,7 +58,27 @@ npm install
 
 ### Troubleshooting
 
-If you encounter Node.js related issues, install Node.js locally and disable the built-in Node.js as described in [this guide](https://github.com/vlad-ds/pdf-agent-mcp#troubleshooting-nodejs-issues).
+If you encounter issues loading the extension or Node.js related problems:
+
+#### Required Node.js Configuration (if issues occur)
+
+⚠️ **Important**: This extension may require disabling Claude Desktop's built-in Node.js
+
+1. **Install Node.js LTS**: Visit [nodejs.org](https://nodejs.org) and download the LTS version
+2. **Configure Claude Desktop**:
+   - Go to Claude > Settings > Extensions > Advanced Settings
+   - **Disable** "Use Built-in Node.js for MCP"  
+   - Restart Claude Desktop
+
+This extension will NOT work with Claude's built-in Node.js. You must use your system's Node.js installation.
+
+#### Additional Troubleshooting Steps
+
+If you still experience issues:
+1. Verify Node.js is installed: Run `node --version` in your terminal
+2. Ensure "Use Built-in Node.js for MCP" is disabled in Claude Desktop settings
+3. Restart Claude Desktop completely
+4. Check the logs at `~/Library/Logs/Claude/` (macOS) or `%LOCALAPPDATA%\Claude\Logs\` (Windows) for MCP server error details
 
 ## Available Tools
 
